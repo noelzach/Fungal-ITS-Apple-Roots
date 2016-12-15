@@ -1,0 +1,289 @@
+---
+title: "Analysis"
+author: "Zachary Noel"
+date: "12/11/2016"
+output:
+  md_document:
+    variant: markdown_github
+  html_document: default
+  word_document: default
+---
+
+Some of the following code was adapted from the EDAMAME workshop at Michigann State University 
+* Found here: [https://github.com/raleva/Edamame_phyloseq/blob/master/Edamame_phyloseq.Rmd](https://github.com/raleva/Edamame_phyloseq/blob/master/Edamame_phyloseq.Rmd)
+
+I include this header at the top of all code I write. 
+
+```{r eval=FALSE}
+rm(list = ls(all=TRUE)) # removes all variables in the global environment so you start fresh
+
+Sys.time() # prints out the time and date you ran the code
+
+options(scipen = 999) # stops anything from being in scientific notation
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# ipak function: install and load multiple R packages.
+# check to see if packages are installed. Install them if they are not, then load them into the R session.
+# Source: https://gist.github.com/stevenworthington/3178163
+ipak <- function(pkg){
+new.pkg <- pkg[!(pkg %in% installed.packages()[,"Package"])]
+if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+sapply(pkg, require, character.only = TRUE)
+}
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("phyloseq")
+packages <- c("biom", "qiimer", "vegan", "MASS", "ape", "phyloseq", "ggplot2", "plyr", "indicspecies", "labdsv", "dplyr", "reshape")
+ipak(packages)
+```
+
+Loading data: you need the biom file, the mapping file, and the taxonomy file
+```{r}
+#Loading the mapping file
+samp_dat <- read.table("../data/input_files/mapping.txt", header = F)
+colnames(samp_dat) <- c("SampleID", 
+                        "BarcodeSequence",	
+                        "LinkerPrimerSequence",	
+                        "Region",	
+                        "barcodenumb",	
+                        "groups",	
+                        "OrchardMan",	
+                        "Rep",	
+                        "Distance_cat",	
+                        "Distance_meters",	
+                        "group_m",	
+                        "group",	
+                        "Description")
+rownames(samp_dat) <- samp_dat$SampleID #row names must match OTU table headers
+SAMP <- sample_data(samp_dat)
+
+# biom file
+biom <- import_biom("../data/input_files/R1_otu_table_tax_json.biom", header=T)
+OTU <- otu_table(biom, taxa_are_rows = TRUE)
+
+# taxonomy file
+taxonomy<-read.table("../data/input_files/R1_taxonomy_otutaxout__RDP.txt", sep="\t", header=F)
+```
+
+This reads the taxonomy object and puts it into a better format for R to handle
+```{r}
+tax<-as.character(taxonomy$V2)
+head(tax)
+#root<-NA
+Kingdom<-NA
+Phylum<-NA
+Class<-NA
+Order<-NA
+Family<-NA
+Genus<-NA
+Species<-NA
+
+linaean<-data.frame(Kingdom,Phylum,Class,Order,Family,Genus,Species)
+
+for (i in 1:dim(taxonomy)[1]) {
+  split.tax<-strsplit(tax[i],split=c(";"))
+  linaean[i,1]<-substr(split.tax[[1]][1], 4,30)
+  linaean[i,2]<-substr(split.tax[[1]][2], 4,30)
+  linaean[i,3]<-substr(split.tax[[1]][3], 4,30)
+  linaean[i,4]<-substr(split.tax[[1]][4], 4,30)
+  linaean[i,5]<-substr(split.tax[[1]][5], 4,30)
+  linaean[i,6]<-substr(split.tax[[1]][6], 4,30)
+  linaean[i,7]<-substr(split.tax[[1]][7], 4,30)
+}
+##
+
+# remove underscore before taxon name
+rownames(linaean) <- taxonomy$V1
+for(i in 2:7){
+linaean[,i] <- gsub("_","",linaean[,i])
+}
+
+TAX <- tax_table(as.matrix(linaean))
+```
+
+Read in your OTU, TAX and SAMP objects into phyloseq
+```{r}
+myphy <- phyloseq(OTU, TAX, SAMP)
+```
+
+For some reason our database had Cercozoa as a fungi... This is not correct so we will want to take that out 
+```{r}
+taxon <- data.frame(myphy@tax_table@.Data)
+levels(taxon$Phylum)
+myphy.nocer <- subset_taxa(myphy, Phylum !="Cercozoa") #include all OTUS identified
+
+#Sanity check, make sure it actually did take it out 
+taxon <- data.frame(myphy.nocer@tax_table@.Data)
+levels(taxon$Phylum) # ok good 
+```
+
+Rarefy to an even read depth
+```{r}
+myphy_f_rare <- rarefy_even_depth(myphy.nocer, rngseed=1) #record seed and # of OTUs removed
+```
+
+Calculate species richness by rarefaction, shannon and simpson indices with vegan 
+```{r}
+rare.otu <- myphy_f_rare@otu_table
+colnames(rare.otu) <- myphy_f_rare@sam_data$Comb_group
+S <- specnumber(t(rare.otu))
+raremax <- min(rowSums(t(rare.otu)))
+Srare <- data.frame(rarefy(t(rare.otu), raremax)); colnames(Srare) <- c("Rarefied Counts")
+summary(Srare$`Rarefied Counts`)
+Srare$Distance <- myphy_f_rare@sam_data$Distance_cat
+Srare$Orchard <- myphy_f_rare@sam_data$OrchardMan
+shannon <- diversity(t(myphy_f_rare@otu_table), index = "shannon")
+simpson <- diversity(t(myphy_f_rare@otu_table), index = "simpson")
+Srare$Simpson <- simpson
+Srare$Shannon <- shannon
+```
+
+Compare these using an anova
+```{r}
+lm.rare <- lm(Srare[,1] ~ Distance + Orchard, data = Srare)
+anova(lm.rare)
+lm.simp <- lm(Simpson ~ Distance + Orchard, data = Srare)
+anova(lm.simp)
+lm.shan <- lm(Shannon ~ Distance + Orchard, data = Srare)
+anova(lm.simp)
+```
+
+Generate plots of species richness
+```{r}
+m.Srare <- melt(Srare)
+ggplot(m.Srare, aes(x=Distance, y=value)) +
+  geom_boxplot()+
+  theme_bw() +
+  facet_wrap(~variable, scales = "free")
+```
+
+##Beta diversity 
+Here we will just look at an NMDS ordination (k = 2) to see if there might be a relationship between beta diversity and distance from the tree, or orchard management type. 
+
+NMDS ordination 
+```{r}
+GPdist = phyloseq::distance(myphy_f_rare, "bray") # create bray-curtis distance matrix
+GP.ord <- ordinate(myphy_f_rare, "NMDS", "bray", k = 2) # NMDS ordination 
+GP.ord$stress
+ord.plot <- plot_ordination(myphy_f_rare, ordination = GP.ord, type = "samples", justDF = T) 
+ggplot(ord.plot, aes(x = NMDS1, y = NMDS2, color = Distance_cat, label = Distance_cat, shape = OrchardMan)) +
+  geom_point(size = 5) + 
+  geom_text(vjust = 0, nudge_y = 0, color = "black", size = 2) +
+  theme_bw()
+```
+It appears as if there is more of an influence on beta-diversity based on how far the sample was taken from the tree, regardless of the orchard management type. 
+
+Lets do a PERMANOVA to see if this relationship is significant. 
+
+* Model: Distance = Orchard Management + Distance 
+* Note we cannot run the interaction since we only have two orchard sites 
+```{r}
+adonis(GPdist~OrchardMan + Distance_cat,  as(sample_data(myphy_f_rare), "data.frame"))
+```
+Looks like Distance from the tree was significant, its not a strong relationship however. 
+
+Lets see if we can find any phylum that increase or decrease in abundance with distance from the tree
+
+Bar graphs for phylum
+```{r}
+myphy_Phylum <- tax_glom(myphy_f_rare, taxrank="Phylum") #agglomerate taxa based on Phylum level
+plot_bar(myphy_Phylum, x = "Distance_cat", y = "Abundance", fill = "Phylum", facet_grid = ~OrchardMan) + 
+  theme_bw()
+```
+
+Lets merge our OTU table by distance from the tree and take only the phylum data
+```{r}
+mergedDist = merge_samples(myphy_f_rare, "Distance_cat")
+mergedDist.phylum = tax_glom(mergedDist, "Phylum")
+```
+
+###Now use a heatmap to see which taxa increase or decrease in abundance
+```{r}
+sampleOrder = unique(sample_names(mergedDist.phylum@sam_data))
+taxaOrder = unique(taxa_names(mergedDist.phylum))
+heat.phylum <- plot_heatmap(mergedDist.phylum,"MDS", "bray", sample.order = sampleOrder, taxa.label = "Phylum") + theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size=5)) 
+```
+Hmm there seem to be some taxa that might increase in abundance with increasing distance from the tree like Glomeromycota
+
+Lets take only the Glomeromycota data to see if this is true. 
+```{r}
+phylum.otu.bydistance <- data.frame(t(mergedDist.phylum@otu_table))
+rownames(phylum.otu.bydistance) <- mergedDist.phylum@tax_table@.Data[,2]
+colnames(phylum.otu.bydistance) <- c("0m", "2m", "4m", "out")
+phylum.otu.bydistance$Phylum <- rownames(phylum.otu.bydistance)
+phylum.m <- melt(phylum.otu.bydistance)
+
+bar.glom <- ggplot(phylum.m[phylum.m$Phylum == "Glomeromycota",], aes(x = variable, y = value)) +
+  geom_bar(stat = "identity") + 
+  theme_bw() + 
+  ylab("Abundance") + 
+  xlab("Distance from trunk") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gridExtra::grid.arrange(heat.phylum, bar.glom)
+```
+
+It does seem that Glomeromycota increases in abundance with distance from the tree. Lets test if this is significant by doing what we did before with alpha and beta diversity but only with Glomeromycota
+```{r}
+myphy_glom <- subset_taxa(myphy_f_rare, Phylum=="Glomeromycota")
+```
+
+###Just Glomeromycota
+Calculate alpha-diversity by shannon and simpson indices with vegan 
+```{r}
+Shannon <- diversity(t(myphy_glom@otu_table), index = "shannon")
+Simpson <- diversity(t(myphy_glom@otu_table), index = "simpson")
+glom <- data.frame(shannon, simpson)
+glom$Distance <- myphy_glom@sam_data$Distance_cat
+glom$Orchard <- myphy_glom@sam_data$OrchardMan
+```
+
+Compare these metrics using an anova
+```{r}
+lm.glom.simp <- lm(Simpson ~ Distance + Orchard, data = glom)
+anova(lm.glom.simp)
+lm.glom.shan <- lm(Shannon ~ Distance + Orchard, data = glom)
+anova(lm.glom.shan)
+summary(lm.glom.shan)
+```
+
+Generate plots of species richness for glomeromycota
+```{r}
+m.glom <- melt(glom)
+ggplot(m.glom, aes(x=Distance, y=value)) +
+  geom_boxplot()+
+  theme_bw() +
+  facet_wrap(~variable, scales = "free")
+```
+It seems as though glomeromycota might be more diverse (not very strong) based on the distance taken away from the tree
+
+###Indicator species analysis
+Indicator species analysis attempts to find species that are significanly associated with an a priori sample grouping. 
+```{r}
+indicator.dist <- indicspecies::multipatt(as.data.frame(t(myphy_f_rare@otu_table)), cluster = myphy_f_rare@sam_data$Distance_cat)
+summary(indicator.dist)
+
+rare.otu <- as.data.frame(myphy_f_rare@tax_table)
+rare.otu$otu <- rownames(rare.otu)
+indicator.tax <- rare.otu[rare.otu$otu == "OTU427",]
+indicator.tax[2,] <- rare.otu[rare.otu$otu == "OTU1152",]
+indicator.tax$distance <- "0m"
+indicator.tax[3,] <- rare.otu[rare.otu$otu == "OTU1352",]
+indicator.tax$distance[3] <- "2m"
+indicator.tax[4,] <- rare.otu[rare.otu$otu == "OTU395",]
+indicator.tax[5,] <- rare.otu[rare.otu$otu == "OTU763",]
+indicator.tax[6,] <- rare.otu[rare.otu$otu == "OTU159",]
+indicator.tax[7,] <- rare.otu[rare.otu$otu == "OTU918",]
+indicator.tax$distance[4:7] <- "4m"
+
+indicator.tax
+#Write a .csv file of the indicator speices analysis if desired
+#write.csv(indicator.tax, "indicatorspeciesanal.csv")
+```
+
+Well based on the indicator species analysis we cannot tell much since many of these are unidentified taxa, however we can make biological sense of the 2m indicator species being a Penicillium. Penicillium species are known to be good fruit rotters and having it as an indicator species to 2m makes sense because this is where fruit would most likely fall.
